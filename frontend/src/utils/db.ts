@@ -13,7 +13,7 @@ import type { CoralRecord } from '@/types/coralRecord'
 import type { FishCount } from '@/types/fishCount'
 
 /** 当前数据结构版本号：每次调整字段结构必须 +1 并补迁移 */
-export const DB_VERSION = 2
+export const DB_VERSION = 3
 
 /** 数据库名（浏览器 IndexedDB 中的库名） */
 export const DB_NAME = 'gbcoralbelt'
@@ -86,6 +86,54 @@ export class CoralBeltDatabase extends Dexie {
             })
         }
       })
+
+    // v3：珊瑚记录增加下水复查（review）。
+    // 不新增索引，仅声明版本；迁移时清洗历史上可能写入的非法复查：
+    // 复查长度按样带全长封顶，复查日期早于调查日期时抬到调查日期，无法识别的复查整段删除。
+    this.version(DB_VERSION)
+      .stores({
+        reefs: 'id, name, location, protectStatus, areaKm2, manager, updatedAt',
+        sites: 'id, reefId, no, lat, lng, depthM, substrate, updatedAt',
+        belts: 'id, siteId, no, lengthM, orientation, surveyDate, observer, updatedAt',
+        corals: 'id, beltId, genus, form, coverCm, bleachLevel, updatedAt',
+        fishes: 'id, beltId, family, count, sizeClass, category, updatedAt'
+      })
+      .upgrade(async (tx) => {
+        const belts = await tx.table<Belt, string>('belts').toArray()
+        const beltById = new Map(belts.map((belt) => [belt.id, belt]))
+        const validLevels = ['无', '轻', '中', '重', '死亡']
+        await tx
+          .table('corals')
+          .toCollection()
+          .modify((coral: Record<string, unknown>) => {
+            const raw = coral.review as Record<string, unknown> | null | undefined
+            if (!raw || typeof raw !== 'object') {
+              delete coral.review
+              return
+            }
+            const belt = beltById.get(String(coral.beltId))
+            const surveyDate = belt?.surveyDate
+            const validDate = typeof raw.reviewDate === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(raw.reviewDate)
+            if (!validDate || !validLevels.includes(String(raw.bleachLevel))) {
+              delete coral.review
+              return
+            }
+            let coverCm = Number(raw.coverCm)
+            if (!Number.isFinite(coverCm) || coverCm < 0) {
+              delete coral.review
+              return
+            }
+            if (belt) coverCm = Math.min(coverCm, belt.lengthM * 100)
+            const reviewDate =
+              surveyDate && (raw.reviewDate as string) < surveyDate ? surveyDate : (raw.reviewDate as string)
+            coral.review = {
+              reviewDate,
+              coverCm: Number(coverCm.toFixed(1)),
+              bleachLevel: String(raw.bleachLevel),
+              reviewedAt: typeof raw.reviewedAt === 'number' ? raw.reviewedAt : Date.now()
+            }
+          })
+      })
   }
 }
 
@@ -121,6 +169,12 @@ interface SeedCoral {
   coverCm: number
   bleachLevel: CoralRecord['bleachLevel']
   remark: string
+  /** 下水复查（与调查日期一起用于演示复查后覆盖率 / 白化指数变化） */
+  review?: {
+    reviewDate: string
+    coverCm: number
+    bleachLevel: CoralRecord['bleachLevel']
+  }
 }
 
 interface SeedFish {
@@ -151,6 +205,8 @@ interface SeedBelt {
 export async function seedDemoData(): Promise<void> {
   const now = Date.now()
   const today = new Date(now).toISOString().slice(0, 10)
+  // 初查统一在一周前，复查日期取今天，便于演示「复查后覆盖与等级覆盖初查」
+  const surveyDate = new Date(now - 7 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10)
 
   const reefs: Array<Omit<Reef, 'createdAt' | 'updatedAt'>> = [
     {
@@ -225,7 +281,7 @@ export async function seedDemoData(): Promise<void> {
       no: 'T-01',
       lengthM: 50,
       orientation: '北',
-      surveyDate: today,
+      surveyDate,
       observer: '林之遥',
       corals: [
         { id: 'cor_ql01a_1', beltId: 'belt_ql01_a', genus: '鹿角珊瑚属', form: '枝状', coverCm: 860, bleachLevel: '无', remark: '长势良好' },
@@ -246,12 +302,18 @@ export async function seedDemoData(): Promise<void> {
       no: 'T-02',
       lengthM: 50,
       orientation: '东',
-      surveyDate: today,
+      surveyDate,
       observer: '林之遥',
       corals: [
-        { id: 'cor_ql01b_1', beltId: 'belt_ql01_b', genus: '蔷薇珊瑚属', form: '叶状', coverCm: 720, bleachLevel: '中', remark: '边缘白化明显' },
+        {
+          id: 'cor_ql01b_1', beltId: 'belt_ql01_b', genus: '蔷薇珊瑚属', form: '叶状', coverCm: 720, bleachLevel: '中', remark: '边缘白化明显',
+          review: { reviewDate: today, coverCm: 640, bleachLevel: '轻' }
+        },
         { id: 'cor_ql01b_2', beltId: 'belt_ql01_b', genus: '蜂巢珊瑚属', form: '块状', coverCm: 980, bleachLevel: '轻', remark: '' },
-        { id: 'cor_ql01b_3', beltId: 'belt_ql01_b', genus: '鹿角珊瑚属', form: '枝状', coverCm: 430, bleachLevel: '重', remark: '大面积白化，部分死亡' }
+        {
+          id: 'cor_ql01b_3', beltId: 'belt_ql01_b', genus: '鹿角珊瑚属', form: '枝状', coverCm: 430, bleachLevel: '重', remark: '大面积白化，部分死亡',
+          review: { reviewDate: today, coverCm: 360, bleachLevel: '死亡' }
+        }
       ],
       fishes: [
         { id: 'fsh_ql01b_1', beltId: 'belt_ql01_b', family: '隆头鱼科', count: 22, sizeClass: '11-20cm', category: '鱼类' },
@@ -265,7 +327,7 @@ export async function seedDemoData(): Promise<void> {
       no: 'T-01',
       lengthM: 30,
       orientation: '南',
-      surveyDate: today,
+      surveyDate,
       observer: '周渝',
       corals: [
         { id: 'cor_ql02a_1', beltId: 'belt_ql02_a', genus: '滨珊瑚属', form: '块状', coverCm: 1240, bleachLevel: '无', remark: '' },
@@ -282,7 +344,7 @@ export async function seedDemoData(): Promise<void> {
       no: 'T-01',
       lengthM: 100,
       orientation: '西',
-      surveyDate: today,
+      surveyDate,
       observer: '陈立群',
       corals: [
         { id: 'cor_yr01a_1', beltId: 'belt_yr01_a', genus: '星珊瑚属', form: '块状', coverCm: 1580, bleachLevel: '轻', remark: '' },
@@ -301,11 +363,14 @@ export async function seedDemoData(): Promise<void> {
       no: 'T-01',
       lengthM: 25,
       orientation: '东',
-      surveyDate: today,
+      surveyDate,
       observer: '陈立群',
       corals: [
         { id: 'cor_dz01a_1', beltId: 'belt_dz01_a', genus: '杯形珊瑚属', form: '枝状', coverCm: 520, bleachLevel: '重', remark: '受台风扰动后白化' },
-        { id: 'cor_dz01a_2', beltId: 'belt_dz01_a', genus: '蜂巢珊瑚属', form: '块状', coverCm: 310, bleachLevel: '中', remark: '' }
+        {
+          id: 'cor_dz01a_2', beltId: 'belt_dz01_a', genus: '蜂巢珊瑚属', form: '块状', coverCm: 310, bleachLevel: '中', remark: '',
+          review: { reviewDate: today, coverCm: 280, bleachLevel: '重' }
+        }
       ],
       fishes: [
         { id: 'fsh_dz01a_1', beltId: 'belt_dz01_a', family: '雀鲷科', count: 34, sizeClass: '0-10cm', category: '鱼类' },
@@ -332,7 +397,14 @@ export async function seedDemoData(): Promise<void> {
     )
     await db.corals.bulkPut(
       belts.flatMap((belt, beltIndex) =>
-        belt.corals.map((coral, coralIndex) => ({ ...coral, ...stamp(300 + beltIndex * 100 + coralIndex) }))
+        belt.corals.map((coral, coralIndex) => {
+          const { review, ...rest } = coral
+          return {
+            ...rest,
+            ...stamp(300 + beltIndex * 100 + coralIndex),
+            review: review ? { ...review, reviewedAt: now + 500 + beltIndex * 100 + coralIndex } : null
+          }
+        })
       )
     )
     await db.fishes.bulkPut(

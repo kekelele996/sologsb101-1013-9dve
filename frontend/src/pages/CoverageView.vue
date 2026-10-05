@@ -116,6 +116,12 @@ async function refresh(): Promise<void> {
     surveyDate: row.surveyDate,
     observer: row.observer,
     coralCount: row.coralCount,
+    reviewedCount: row.reviewedCount,
+    latestReviewDate: row.reviewedCount > 0
+      ? surveyStore.corals
+          .filter((coral) => coral.beltId === row.beltId && coral.review)
+          .reduce((latest, coral) => (coral.review && coral.review.reviewDate > latest ? coral.review.reviewDate : latest), '')
+      : '',
     coverCmTotal: row.coverCmTotal,
     coveragePct: row.coveragePct,
     bleachIndex: row.bleachIndex,
@@ -215,10 +221,10 @@ async function handleDatabaseReset(): Promise<void> {
 
 async function copySummary(): Promise<void> {
   const text = rows.value
-    .map(
-      (row) =>
-        `${row.reefName}｜站位 ${row.siteNo}｜样带 ${row.beltNo}（${row.orientation}向 ${row.lengthM} m）：珊瑚覆盖率 ${row.coveragePct}%，白化指数 ${row.bleachIndex}（${row.grade}），白化占比 ${row.bleachedSharePct}%，鱼类 ${row.fishTotal} 尾（${row.fishDensity} 尾/100m²）`
-    )
+    .map((row) => {
+      const reviewNote = row.reviewedCount > 0 ? `，已复查 ${row.reviewedCount} 条（统计按复查值）` : ''
+      return `${row.reefName}｜站位 ${row.siteNo}｜样带 ${row.beltNo}（${row.orientation}向 ${row.lengthM} m）：珊瑚覆盖率 ${row.coveragePct}%，白化指数 ${row.bleachIndex}（${row.grade}），白化占比 ${row.bleachedSharePct}%${reviewNote}，鱼类 ${row.fishTotal} 尾（${row.fishDensity} 尾/100m²）`
+    })
     .join('\n')
   try {
     await navigator.clipboard.writeText(text)
@@ -304,6 +310,9 @@ onMounted(() => {
         <span class="gb-hint">
           总体白化指数 {{ surveyStore.globalStats.bleachIndex }}（{{ surveyStore.globalStats.grade }}）· 白化占比
           {{ surveyStore.globalStats.bleachedSharePct }}% · 存在白化样带 {{ totals.bleachedBelts }} 条
+          <template v-if="surveyStore.globalStats.reviewedCount > 0">
+            · 已复查 {{ surveyStore.globalStats.reviewedCount }} 条（各项均按复查值统计）
+          </template>
         </span>
       </div>
       <div class="gb-bars">
@@ -390,9 +399,10 @@ onMounted(() => {
             <span class="gb-mono">{{ row.invertebrateTotal }} 个</span>
           </template>
         </el-table-column>
-        <el-table-column label="调查" min-width="150">
+        <el-table-column label="调查 / 复查" min-width="160">
           <template #default="{ row }">
             <div class="gb-mono">{{ row.surveyDate }}</div>
+            <div v-if="row.reviewedCount > 0" class="gb-hint">复查 {{ row.reviewedCount }} 条</div>
             <div class="gb-hint">{{ row.observer || '未填写调查人' }}</div>
           </template>
         </el-table-column>
@@ -412,9 +422,10 @@ onMounted(() => {
             <span class="gb-mono">{{ row.siteCount }} / {{ row.beltCount }}</span>
           </template>
         </el-table-column>
-        <el-table-column label="珊瑚记录" width="110" align="right">
+        <el-table-column label="珊瑚记录" width="120" align="right">
           <template #default="{ row }">
             <span class="gb-mono">{{ row.coralCount }}</span>
+            <div v-if="row.reviewedCount > 0" class="gb-hint gb-mono">已复查 {{ row.reviewedCount }}</div>
           </template>
         </el-table-column>
         <el-table-column label="覆盖长度" width="130" align="right">

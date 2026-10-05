@@ -9,7 +9,7 @@ import { useReefStore } from '@/stores/reefStore'
 import { useBeltStore } from '@/stores/beltStore'
 import { useSurveyStore } from '@/stores/surveyStore'
 import type { BleachLevel, CoralRecord, CoralForm } from '@/types/coralRecord'
-import { BLEACH_LEVELS } from '@/types/coralRecord'
+import { BLEACH_LEVELS, effectiveCoral } from '@/types/coralRecord'
 import type { FishCount } from '@/types/fishCount'
 import {
   bleachGrade,
@@ -35,6 +35,8 @@ export interface BeltCoverage {
   surveyDate: string
   observer: string
   coralCount: number
+  /** 已补记下水复查的记录条数 */
+  reviewedCount: number
   coverCmTotal: number
   /** 珊瑚覆盖率（%） */
   coveragePct: number
@@ -132,15 +134,16 @@ export function useCoverage(): UseCoverageResult {
     const reef = site ? reefOf(site.reefId) : null
     const beltCorals = corals.value.filter((coral) => coral.beltId === belt.id)
     const beltFishes = fishes.value.filter((fish) => fish.beltId === belt.id)
+    const metrics = beltCorals.map(effectiveCoral)
     const coverCmTotal = round(
-      beltCorals.reduce((sum, coral) => sum + coral.coverCm, 0),
+      metrics.reduce((sum, coral) => sum + coral.coverCm, 0),
       1
     )
     const index = bleachIndex(beltCorals)
     const distribution = EMPTY_DISTRIBUTION()
     BLEACH_LEVELS.forEach((level) => {
       distribution[level] = round(
-        beltCorals.filter((coral) => coral.bleachLevel === level).reduce((sum, coral) => sum + coral.coverCm, 0),
+        metrics.filter((coral) => coral.bleachLevel === level).reduce((sum, coral) => sum + coral.coverCm, 0),
         1
       )
     })
@@ -160,6 +163,7 @@ export function useCoverage(): UseCoverageResult {
       surveyDate: belt.surveyDate,
       observer: belt.observer,
       coralCount: beltCorals.length,
+      reviewedCount: beltCorals.filter((coral) => coral.review).length,
       coverCmTotal,
       coveragePct: coralCoveragePct(coverCmTotal, belt.lengthM),
       bleachIndex: index,
@@ -192,15 +196,18 @@ export function useCoverage(): UseCoverageResult {
     const siteBelts = belts.value.filter((belt) => belt.siteId === site.id)
     const beltIds = new Set(siteBelts.map((belt) => belt.id))
     const siteCorals = corals.value.filter((coral) => beltIds.has(coral.beltId))
+    const siteMetrics = siteCorals.map(effectiveCoral)
     const siteFishes = fishes.value.filter((fish) => beltIds.has(fish.beltId))
     const coverCmTotal = round(
-      siteCorals.reduce((sum, coral) => sum + coral.coverCm, 0),
+      siteMetrics.reduce((sum, coral) => sum + coral.coverCm, 0),
       1
     )
     const coverages = siteBelts.map((belt) => {
-      const beltCorals = siteCorals.filter((coral) => coral.beltId === belt.id)
+      const beltMetrics = siteCorals
+        .filter((coral) => coral.beltId === belt.id)
+        .map(effectiveCoral)
       return coralCoveragePct(
-        beltCorals.reduce((sum, coral) => sum + coral.coverCm, 0),
+        beltMetrics.reduce((sum, coral) => sum + coral.coverCm, 0),
         belt.lengthM
       )
     })
@@ -244,9 +251,10 @@ export function useCoverage(): UseCoverageResult {
 
   const globalDistribution = computed<Record<BleachLevel, number>>(() => {
     const distribution = EMPTY_DISTRIBUTION()
+    const metrics = corals.value.map(effectiveCoral)
     BLEACH_LEVELS.forEach((level) => {
       distribution[level] = round(
-        corals.value.filter((coral) => coral.bleachLevel === level).reduce((sum, coral) => sum + coral.coverCm, 0),
+        metrics.filter((coral) => coral.bleachLevel === level).reduce((sum, coral) => sum + coral.coverCm, 0),
         1
       )
     })
@@ -260,15 +268,19 @@ export function useCoverage(): UseCoverageResult {
       const beltLengthCm = belt ? belt.lengthM * 100 : 0
       return corals.value
         .filter((coral) => coral.beltId === beltId)
-        .map((record) => ({
-          record,
-          coverSharePct: beltLengthCm > 0 ? round((record.coverCm / beltLengthCm) * 100, 1) : 0
-        }))
+        .map((record) => {
+          const metric = effectiveCoral(record)
+          return {
+            record,
+            coverSharePct: beltLengthCm > 0 ? round((metric.coverCm / beltLengthCm) * 100, 1) : 0
+          }
+        })
         .sort((a, b) => {
           const weightDiff =
-            BLEACH_WEIGHT_ORDER[b.record.bleachLevel] - BLEACH_WEIGHT_ORDER[a.record.bleachLevel]
+            BLEACH_WEIGHT_ORDER[effectiveCoral(b.record).bleachLevel] -
+            BLEACH_WEIGHT_ORDER[effectiveCoral(a.record).bleachLevel]
           if (weightDiff !== 0) return weightDiff
-          return b.record.coverCm - a.record.coverCm
+          return effectiveCoral(b.record).coverCm - effectiveCoral(a.record).coverCm
         })
     })
   }

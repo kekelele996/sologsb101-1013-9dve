@@ -13,6 +13,7 @@ import {
 } from '@/utils/db'
 import {
   BLEACH_LEVELS,
+  effectiveCoral,
   type BleachLevel
 } from '@/types/coralRecord'
 import { bleachGrade, bleachIndex, bleachedSharePct, coralCoveragePct, fishDensity, round } from '@/utils/bleach'
@@ -111,8 +112,39 @@ export function readFileText(file: File): Promise<string> {
   })
 }
 
+/** 归一化快照中的珊瑚记录：补齐复查字段，并按样带全长封顶复查覆盖长度 */
+function normalizeCorals(payload: BackupPayload): void {
+  const beltById = new Map(payload.belts.map((belt) => [belt.id, belt]))
+  payload.corals = payload.corals.map((coral) => {
+    const review = coral.review
+    if (!review || typeof review !== 'object') {
+      return { ...coral, review: null }
+    }
+    const belt = beltById.get(coral.beltId)
+    const validDate = typeof review.reviewDate === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(review.reviewDate)
+    const coverCm = Number(review.coverCm)
+    const validLevel = BLEACH_LEVELS.includes(review.bleachLevel)
+    if (!validDate || !validLevel || !Number.isFinite(coverCm) || coverCm < 0) {
+      return { ...coral, review: null }
+    }
+    const clamped = belt ? Math.min(coverCm, belt.lengthM * 100) : coverCm
+    const reviewDate =
+      belt && review.reviewDate < belt.surveyDate ? belt.surveyDate : review.reviewDate
+    return {
+      ...coral,
+      review: {
+        reviewDate,
+        coverCm: Number(clamped.toFixed(1)),
+        bleachLevel: review.bleachLevel,
+        reviewedAt: typeof review.reviewedAt === 'number' ? review.reviewedAt : Date.now()
+      }
+    }
+  })
+}
+
 /** 导入快照：overwrite=true 先清空全部表，否则按主键合并 */
 export async function importBackup(payload: BackupPayload, overwrite: boolean): Promise<CountMap> {
+  normalizeCorals(payload)
   if (overwrite) await clearAllTables()
   await db.transaction('rw', [db.reefs, db.sites, db.belts, db.corals, db.fishes], async () => {
     await db.reefs.bulkPut(payload.reefs)
@@ -174,6 +206,10 @@ export interface CoverageLine {
   surveyDate: string
   observer: string
   coralCount: number
+  /** 已补记下水复查的记录条数 */
+  reviewedCount: number
+  /** 最近一次复查日期（无复查为空串） */
+  latestReviewDate: string
   coverCmTotal: number
   /** 珊瑚覆盖率（%） */
   coveragePct: number
@@ -214,16 +250,25 @@ export function buildCoverageLines(payload: BackupPayload): CoverageLine[] {
       const reef = site ? reefById.get(site.reefId) : undefined
       const corals = coralsByBelt.get(belt.id) ?? []
       const fishes = fishesByBelt.get(belt.id) ?? []
+      // 补记复查的记录按复查覆盖长度 / 等级进入结论，未复查的按初查值
+      const metrics = corals.map(effectiveCoral)
+      const reviewedCount = corals.filter((coral) => coral.review).length
+      const latestReviewDate = corals.reduce(
+        (latest, coral) => (coral.review && coral.review.reviewDate > latest ? coral.review.reviewDate : latest),
+        ''
+      )
       const coverCmTotal = round(
-        corals.reduce((sum, coral) => sum + coral.coverCm, 0),
+        metrics.reduce((sum, coral) => sum + coral.coverCm, 0),
         1
       )
       const index = bleachIndex(corals)
       const grade = bleachGrade(index)
+      const coveragePct = coralCoveragePct(coverCmTotal, belt.lengthM)
+      const sharePct = bleachedSharePct(corals)
       const distribution: BleachDistribution = { 无: 0, 轻: 0, 中: 0, 重: 0, 死亡: 0 }
       BLEACH_LEVELS.forEach((level) => {
         distribution[level] = round(
-          corals.filter((coral) => coral.bleachLevel === level).reduce((sum, coral) => sum + coral.coverCm, 0),
+          metrics.filter((coral) => coral.bleachLevel === level).reduce((sum, coral) => sum + coral.coverCm, 0),
           1
         )
       })
@@ -243,11 +288,13 @@ export function buildCoverageLines(payload: BackupPayload): CoverageLine[] {
         surveyDate: belt.surveyDate,
         observer: belt.observer,
         coralCount: corals.length,
+        reviewedCount,
+        latestReviewDate,
         coverCmTotal,
-        coveragePct: coralCoveragePct(coverCmTotal, belt.lengthM),
+        coveragePct,
         bleachIndex: index,
         grade,
-        bleachedSharePct: bleachedSharePct(corals),
+        bleachedSharePct: sharePct,
         distribution,
         fishTotal,
         invertebrateTotal,
@@ -256,8 +303,8 @@ export function buildCoverageLines(payload: BackupPayload): CoverageLine[] {
           corals.length === 0
             ? '该样带尚未录入珊瑚记录'
             : grade === '无'
-              ? `珊瑚覆盖率 ${coralCoveragePct(coverCmTotal, belt.lengthM)}%，未见白化`
-              : `珊瑚覆盖率 ${coralCoveragePct(coverCmTotal, belt.lengthM)}%，白化指数 ${index}（${grade}），白化占比 ${bleachedSharePct(corals)}%`
+              ? `珊瑚覆盖率 ${coveragePct}%，未见白化${reviewedCount > 0 ? `（已按 ${reviewedCount} 条下水复查结果更新）` : ''}`
+              : `珊瑚覆盖率 ${coveragePct}%，白化指数 ${index}（${grade}），白化占比 ${sharePct}%${reviewedCount > 0 ? `（已按 ${reviewedCount} 条下水复查结果更新）` : ''}`
       }
     })
     .sort((a, b) => b.bleachIndex - a.bleachIndex)
@@ -271,6 +318,8 @@ export interface ReefSummary {
   siteCount: number
   beltCount: number
   coralCount: number
+  /** 已补记下水复查的记录条数 */
+  reviewedCount: number
   coverCmTotal: number
   avgBleachIndex: number
   grade: BleachLevel
@@ -282,6 +331,7 @@ export function buildReefSummaries(payload: BackupPayload, lines: CoverageLine[]
     const siteIds = new Set(payload.sites.filter((site) => site.reefId === reef.id).map((site) => site.id))
     const beltIds = new Set(payload.belts.filter((belt) => siteIds.has(belt.siteId)).map((belt) => belt.id))
     const corals = payload.corals.filter((coral) => beltIds.has(coral.beltId))
+    const metrics = corals.map(effectiveCoral)
     const lines4Reef = lines.filter((line) => line.reefId === reef.id)
     const avgBleachIndex =
       lines4Reef.length === 0
@@ -294,8 +344,9 @@ export function buildReefSummaries(payload: BackupPayload, lines: CoverageLine[]
       siteCount: siteIds.size,
       beltCount: beltIds.size,
       coralCount: corals.length,
+      reviewedCount: corals.filter((coral) => coral.review).length,
       coverCmTotal: round(
-        corals.reduce((sum, coral) => sum + coral.coverCm, 0),
+        metrics.reduce((sum, coral) => sum + coral.coverCm, 0),
         1
       ),
       avgBleachIndex,

@@ -2,7 +2,8 @@
  * 白化工具：白化等级排序权重、白化指数换算与配色映射。
  * 页面、store 与数据库播种共用同一套算法。
  */
-import type { BleachLevel, CoralForm } from '@/types/coralRecord'
+import type { BleachLevel, CoralForm, CoralReview } from '@/types/coralRecord'
+import { effectiveCoral } from '@/types/coralRecord'
 
 /** 保留小数位 */
 export function round(value: number, digits = 2): number {
@@ -63,13 +64,25 @@ export const FORM_COLOR: Record<CoralForm, string> = {
 }
 
 /**
+ * 统计口径输入：允许带下水复查。
+ * 有复查的记录按复查覆盖长度 / 白化等级参与统计，未复查的按初次录入值。
+ */
+export type CoralMetricInput = {
+  coverCm: number
+  bleachLevel: BleachLevel
+  review?: CoralReview | null
+}
+
+/**
  * 白化指数：按覆盖长度加权的平均白化等级（0 ~ 4）。
  * 传入每条记录的覆盖长度与白化等级，返回加权平均并保留 2 位小数。
+ * 记录带复查时自动改用复查值。
  */
-export function bleachIndex(records: Array<{ coverCm: number; bleachLevel: BleachLevel }>): number {
-  const totalCover = records.reduce((sum, record) => sum + Math.max(0, record.coverCm), 0)
+export function bleachIndex(records: CoralMetricInput[]): number {
+  const rows = records.map(effectiveCoral)
+  const totalCover = rows.reduce((sum, record) => sum + Math.max(0, record.coverCm), 0)
   if (totalCover <= 0) return 0
-  const weighted = records.reduce(
+  const weighted = rows.reduce(
     (sum, record) => sum + Math.max(0, record.coverCm) * BLEACH_WEIGHT[record.bleachLevel],
     0
   )
@@ -95,11 +108,12 @@ export function coralCoveragePct(coverCmTotal: number, beltLengthM: number): num
   return round((coverCmTotal / beltLengthCm) * 100, 2)
 }
 
-/** 白化占比（%）：白化等级非「无」的覆盖长度占珊瑚总覆盖长度的比例 */
-export function bleachedSharePct(records: Array<{ coverCm: number; bleachLevel: BleachLevel }>): number {
-  const totalCover = records.reduce((sum, record) => sum + Math.max(0, record.coverCm), 0)
+/** 白化占比（%）：白化等级非「无」的覆盖长度占珊瑚总覆盖长度的比例；记录带复查时按复查值统计 */
+export function bleachedSharePct(records: CoralMetricInput[]): number {
+  const rows = records.map(effectiveCoral)
+  const totalCover = rows.reduce((sum, record) => sum + Math.max(0, record.coverCm), 0)
   if (totalCover <= 0) return 0
-  const bleached = records
+  const bleached = rows
     .filter((record) => record.bleachLevel !== '无')
     .reduce((sum, record) => sum + Math.max(0, record.coverCm), 0)
   return round((bleached / totalCover) * 100, 1)
@@ -112,26 +126,28 @@ export function fishDensity(count: number, beltLengthM: number, beltWidthM = 1):
   return round((count / area) * 100, 2)
 }
 
-/** 按属名分组汇总覆盖长度 */
+/** 按属名分组汇总覆盖长度（有复查的记录按复查覆盖长度计入） */
 export function groupByGenus(
-  records: Array<{ genus: string; coverCm: number }>
+  records: Array<{ genus: string; coverCm: number; review?: CoralReview | null }>
 ): Array<{ genus: string; coverCm: number }> {
   const map = new Map<string, number>()
   records.forEach((record) => {
-    map.set(record.genus, (map.get(record.genus) ?? 0) + record.coverCm)
+    const coverCm = record.review ? record.review.coverCm : record.coverCm
+    map.set(record.genus, (map.get(record.genus) ?? 0) + coverCm)
   })
   return Array.from(map.entries())
     .map(([genus, coverCm]) => ({ genus, coverCm: round(coverCm, 1) }))
     .sort((a, b) => b.coverCm - a.coverCm)
 }
 
-/** 按形态分组汇总覆盖长度 */
+/** 按形态分组汇总覆盖长度（有复查的记录按复查覆盖长度计入） */
 export function groupByForm(
-  records: Array<{ form: CoralForm; coverCm: number }>
+  records: Array<{ form: CoralForm; coverCm: number; review?: CoralReview | null }>
 ): Array<{ form: CoralForm; coverCm: number }> {
   const map = new Map<CoralForm, number>()
   records.forEach((record) => {
-    map.set(record.form, (map.get(record.form) ?? 0) + record.coverCm)
+    const coverCm = record.review ? record.review.coverCm : record.coverCm
+    map.set(record.form, (map.get(record.form) ?? 0) + coverCm)
   })
   return Array.from(map.entries())
     .map(([form, coverCm]) => ({ form, coverCm: round(coverCm, 1) }))

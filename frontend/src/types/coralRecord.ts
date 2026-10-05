@@ -8,6 +8,25 @@ export type BleachLevel = '无' | '轻' | '中' | '重' | '死亡'
 
 export const BLEACH_LEVELS: BleachLevel[] = ['无', '轻', '中', '重', '死亡']
 
+/** 珊瑚记录的下水复查（每条记录最多补记一次，可修改覆盖） */
+export interface CoralReview {
+  /** 复查日期（YYYY-MM-DD），不得早于样带调查日期 */
+  reviewDate: string
+  /** 复查覆盖长度（cm），超出样带全长时按样带全长记 */
+  coverCm: number
+  /** 复查白化等级 */
+  bleachLevel: BleachLevel
+  /** 补记时间戳 */
+  reviewedAt: number
+}
+
+/** 复查表单草稿（不存时间戳，保存时生成） */
+export interface CoralReviewDraft {
+  reviewDate: string
+  coverCm: number
+  bleachLevel: BleachLevel
+}
+
 /** 珊瑚记录：样带内某属名、某形态的覆盖长度与白化等级 */
 export interface CoralRecord {
   id: string
@@ -23,8 +42,38 @@ export interface CoralRecord {
   bleachLevel: BleachLevel
   /** 备注（病敌害、断枝等） */
   remark: string
+  /** 下水复查：补记后覆盖率、白化指数与白化占比一律以复查值为准 */
+  review?: CoralReview | null
   createdAt: number
   updatedAt: number
+}
+
+/** 是否已补记复查 */
+export function hasCoralReview(record: Pick<CoralRecord, 'review'> | null | undefined): boolean {
+  return Boolean(record?.review)
+}
+
+/** 生效覆盖长度：有复查取复查值，否则取初次录入值 */
+export function effectiveCoverCm(record: Pick<CoralRecord, 'coverCm' | 'review'>): number {
+  return record.review ? record.review.coverCm : record.coverCm
+}
+
+/** 生效白化等级：有复查取复查值，否则取初次录入值 */
+export function effectiveBleachLevel(record: Pick<CoralRecord, 'bleachLevel' | 'review'>): BleachLevel {
+  return record.review ? record.review.bleachLevel : record.bleachLevel
+}
+
+/**
+ * 记录的生效覆盖长度 / 白化等级视图。
+ * 所有覆盖率、白化指数、白化占比与等级分布统计都应先经此映射，
+ * 保证补记复查后汇总口径不再使用初次录入值。
+ */
+export function effectiveCoral<T extends Pick<CoralRecord, 'coverCm' | 'bleachLevel' | 'review'>>(
+  record: T
+): T & { coverCm: number; bleachLevel: BleachLevel } {
+  return record.review
+    ? { ...record, coverCm: record.review.coverCm, bleachLevel: record.review.bleachLevel }
+    : record
 }
 
 /** 珊瑚记录草稿（存于 surveyStore） */

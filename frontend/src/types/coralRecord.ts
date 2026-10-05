@@ -8,6 +8,16 @@ export type BleachLevel = '无' | '轻' | '中' | '重' | '死亡'
 
 export const BLEACH_LEVELS: BleachLevel[] = ['无', '轻', '中', '重', '死亡']
 
+/** 珊瑚复查信息：每条记录最多补记一次复查，存好后覆盖率/白化指数/白化占比改用复查后的数 */
+export interface CoralReview {
+  /** 复查日期（不早于样带调查日期） */
+  reviewDate: string
+  /** 复查覆盖长度（cm）；超出样带全长的按样带全长记 */
+  reviewCoverCm: number
+  /** 复查白化等级 */
+  reviewBleachLevel: BleachLevel
+}
+
 /** 珊瑚记录：样带内某属名、某形态的覆盖长度与白化等级 */
 export interface CoralRecord {
   id: string
@@ -17,10 +27,12 @@ export interface CoralRecord {
   genus: string
   /** 形态 */
   form: CoralForm
-  /** 覆盖长度（cm） */
+  /** 初查覆盖长度（cm） */
   coverCm: number
-  /** 白化等级 */
+  /** 初查白化等级 */
   bleachLevel: BleachLevel
+  /** 复查补记信息（每条记录最多一次），未复查为 null */
+  review: CoralReview | null
   /** 备注（病敌害、断枝等） */
   remark: string
   createdAt: number

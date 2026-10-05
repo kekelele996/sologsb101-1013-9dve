@@ -5,13 +5,23 @@
 import { defineStore } from 'pinia'
 import { computed, ref } from 'vue'
 import { db, createId, watchTable } from '@/utils/db'
-import type { BleachLevel, CoralForm, CoralRecord } from '@/types/coralRecord'
+import type { BleachLevel, CoralForm, CoralRecord, CoralReview } from '@/types/coralRecord'
 import { BLEACH_LEVELS } from '@/types/coralRecord'
 import type { CountCategory, FishCount, SizeClass } from '@/types/fishCount'
 import type { Reef } from '@/types/reef'
 import type { Site } from '@/types/site'
 import type { Belt } from '@/types/belt'
-import { bleachGrade, bleachIndex, bleachedSharePct, coralCoveragePct, fishDensity, round } from '@/utils/bleach'
+import {
+  bleachGrade,
+  bleachIndex,
+  bleachedSharePct,
+  clampReviewCoverCm,
+  coralCoveragePct,
+  effectiveBleachLevel,
+  effectiveCoverCm,
+  fishDensity,
+  round
+} from '@/utils/bleach'
 
 /** 覆盖度汇总页筛选条件 */
 export interface SurveyFilterState {
@@ -44,6 +54,10 @@ export interface CoverageSummaryRow {
   surveyDate: string
   observer: string
   coralCount: number
+  /** 已补记复查的记录条数 */
+  reviewedCount: number
+  /** 最近一次复查日期（无复查为 null） */
+  lastReviewDate: string | null
   coverCmTotal: number
   coveragePct: number
   bleachIndex: number
@@ -104,16 +118,16 @@ export const useSurveyStore = defineStore('survey', () => {
     })
   }
 
-  /** 某样带的珊瑚记录（按白化等级降序、覆盖长度降序） */
+  /** 某样带的珊瑚记录（按复查后白化等级降序、复查后覆盖长度降序） */
   function coralsOfBelt(beltId: string | null | undefined): CoralRecord[] {
     if (!beltId) return []
     const order: Record<BleachLevel, number> = { 无: 0, 轻: 1, 中: 2, 重: 3, 死亡: 4 }
     return corals.value
       .filter((coral) => coral.beltId === beltId)
       .sort((a, b) => {
-        const diff = order[b.bleachLevel] - order[a.bleachLevel]
+        const diff = order[effectiveBleachLevel(b)] - order[effectiveBleachLevel(a)]
         if (diff !== 0) return diff
-        return b.coverCm - a.coverCm
+        return effectiveCoverCm(b) - effectiveCoverCm(a)
       })
   }
 
@@ -146,13 +160,15 @@ export const useSurveyStore = defineStore('survey', () => {
         const beltCorals = corals.value.filter((coral) => coral.beltId === belt.id)
         const beltFishes = fishes.value.filter((fish) => fish.beltId === belt.id)
         const coverCmTotal = round(
-          beltCorals.reduce((sum, coral) => sum + coral.coverCm, 0),
+          beltCorals.reduce((sum, coral) => sum + effectiveCoverCm(coral), 0),
           1
         )
         const distribution: Record<BleachLevel, number> = { 无: 0, 轻: 0, 中: 0, 重: 0, 死亡: 0 }
         BLEACH_LEVELS.forEach((level) => {
           distribution[level] = round(
-            beltCorals.filter((coral) => coral.bleachLevel === level).reduce((sum, coral) => sum + coral.coverCm, 0),
+            beltCorals
+              .filter((coral) => effectiveBleachLevel(coral) === level)
+              .reduce((sum, coral) => sum + effectiveCoverCm(coral), 0),
             1
           )
         })
@@ -170,6 +186,15 @@ export const useSurveyStore = defineStore('survey', () => {
           surveyDate: belt.surveyDate,
           observer: belt.observer,
           coralCount: beltCorals.length,
+          reviewedCount: beltCorals.filter((coral) => coral.review).length,
+          lastReviewDate:
+            beltCorals.filter((coral) => coral.review).length > 0
+              ? beltCorals
+                  .map((coral) => coral.review?.reviewDate ?? '')
+                  .filter((date) => date.length > 0)
+                  .sort()
+                  .pop() ?? null
+              : null,
           coverCmTotal,
           coveragePct: coralCoveragePct(coverCmTotal, belt.lengthM),
           bleachIndex: index,
@@ -212,12 +237,14 @@ export const useSurveyStore = defineStore('survey', () => {
       filter.value.onlyBleached
   )
 
-  /** 全局白化等级分布与总体指数 */
+  /** 全局白化等级分布与总体指数（已复查记录取复查后的值） */
   const globalStats = computed(() => {
     const distribution: Record<BleachLevel, number> = { 无: 0, 轻: 0, 中: 0, 重: 0, 死亡: 0 }
     BLEACH_LEVELS.forEach((level) => {
       distribution[level] = round(
-        corals.value.filter((coral) => coral.bleachLevel === level).reduce((sum, coral) => sum + coral.coverCm, 0),
+        corals.value
+          .filter((coral) => effectiveBleachLevel(coral) === level)
+          .reduce((sum, coral) => sum + effectiveCoverCm(coral), 0),
         1
       )
     })
@@ -226,7 +253,7 @@ export const useSurveyStore = defineStore('survey', () => {
       coralCount: corals.value.length,
       fishCount: fishes.value.length,
       coverCmTotal: round(
-        corals.value.reduce((sum, coral) => sum + coral.coverCm, 0),
+        corals.value.reduce((sum, coral) => sum + effectiveCoverCm(coral), 0),
         1
       ),
       bleachIndex: index,
@@ -285,6 +312,7 @@ export const useSurveyStore = defineStore('survey', () => {
       form: row.form,
       coverCm: row.coverCm,
       bleachLevel: row.bleachLevel,
+      review: null,
       remark: '',
       createdAt: now + index,
       updatedAt: now + index
@@ -307,6 +335,30 @@ export const useSurveyStore = defineStore('survey', () => {
         coral.updatedAt = now
       })
     return ids.length
+  }
+
+  /**
+   * 补记一次复查：复查日期不早于样带调查日期（页面侧校验），
+   * 复查覆盖长度超出样带全长的按样带全长记；每条记录仅保留一次复查。
+   */
+  async function saveCoralReview(coralId: string, review: CoralReview): Promise<void> {
+    const coral = corals.value.find((item) => item.id === coralId)
+    if (!coral) throw new Error('珊瑚记录不存在')
+    const belt = belts.value.find((item) => item.id === coral.beltId)
+    if (belt && review.reviewDate < belt.surveyDate) {
+      throw new Error('复查日期不能早于样带调查日期')
+    }
+    const normalized: CoralReview = {
+      reviewDate: review.reviewDate,
+      reviewCoverCm: clampReviewCoverCm(review.reviewCoverCm, belt?.lengthM ?? 0),
+      reviewBleachLevel: review.reviewBleachLevel
+    }
+    await db.corals.update(coralId, { review: normalized, updatedAt: Date.now() } as never)
+  }
+
+  /** 清除某条记录的复查补记（恢复按初查值汇总） */
+  async function clearCoralReview(coralId: string): Promise<void> {
+    await db.corals.update(coralId, { review: null, updatedAt: Date.now() } as never)
   }
 
   /* ------------------------------ 鱼类计数 ------------------------------ */
@@ -401,6 +453,8 @@ export const useSurveyStore = defineStore('survey', () => {
     removeCoral,
     importCoralRows,
     bulkSetBleachLevel,
+    saveCoralReview,
+    clearCoralReview,
     createFish,
     updateFish,
     removeFish,

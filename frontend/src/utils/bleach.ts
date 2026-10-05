@@ -2,7 +2,7 @@
  * 白化工具：白化等级排序权重、白化指数换算与配色映射。
  * 页面、store 与数据库播种共用同一套算法。
  */
-import type { BleachLevel, CoralForm } from '@/types/coralRecord'
+import type { BleachLevel, CoralForm, CoralReview } from '@/types/coralRecord'
 
 /** 保留小数位 */
 export function round(value: number, digits = 2): number {
@@ -54,6 +54,30 @@ export function compareBleach(a: BleachLevel, b: BleachLevel, coverA = 0, coverB
   return coverB - coverA
 }
 
+/** 携带覆盖长度与白化等级的记录（珊瑚记录或其派生投影均可），可选复查信息 */
+export interface CoralCoverLike {
+  coverCm: number
+  bleachLevel: BleachLevel
+  review?: CoralReview | null
+}
+
+/** 记录复查后的有效覆盖长度（cm）：已复查取复查覆盖长度，否则取初查值 */
+export function effectiveCoverCm(record: CoralCoverLike): number {
+  return record.review ? record.review.reviewCoverCm : record.coverCm
+}
+
+/** 记录复查后的有效白化等级：已复查取复查白化等级，否则取初查值 */
+export function effectiveBleachLevel(record: CoralCoverLike): BleachLevel {
+  return record.review ? record.review.reviewBleachLevel : record.bleachLevel
+}
+
+/** 复查覆盖长度截断：超出样带全长的按样带全长记，负数按 0 记 */
+export function clampReviewCoverCm(reviewCoverCm: number, beltLengthM: number): number {
+  const beltLengthCm = beltLengthM * 100
+  if (!Number.isFinite(reviewCoverCm)) return 0
+  return round(Math.min(Math.max(0, reviewCoverCm), beltLengthCm), 1)
+}
+
 /** 珊瑚形态配色（用于覆盖率图表） */
 export const FORM_COLOR: Record<CoralForm, string> = {
   枝状: '#0b5d5a',
@@ -64,13 +88,14 @@ export const FORM_COLOR: Record<CoralForm, string> = {
 
 /**
  * 白化指数：按覆盖长度加权的平均白化等级（0 ~ 4）。
- * 传入每条记录的覆盖长度与白化等级，返回加权平均并保留 2 位小数。
+ * 已复查的记录取复查覆盖长度与复查白化等级，返回加权平均并保留 2 位小数。
  */
-export function bleachIndex(records: Array<{ coverCm: number; bleachLevel: BleachLevel }>): number {
-  const totalCover = records.reduce((sum, record) => sum + Math.max(0, record.coverCm), 0)
+export function bleachIndex(records: CoralCoverLike[]): number {
+  const totalCover = records.reduce((sum, record) => sum + Math.max(0, effectiveCoverCm(record)), 0)
   if (totalCover <= 0) return 0
   const weighted = records.reduce(
-    (sum, record) => sum + Math.max(0, record.coverCm) * BLEACH_WEIGHT[record.bleachLevel],
+    (sum, record) =>
+      sum + Math.max(0, effectiveCoverCm(record)) * BLEACH_WEIGHT[effectiveBleachLevel(record)],
     0
   )
   return round(weighted / totalCover, 2)
@@ -95,13 +120,13 @@ export function coralCoveragePct(coverCmTotal: number, beltLengthM: number): num
   return round((coverCmTotal / beltLengthCm) * 100, 2)
 }
 
-/** 白化占比（%）：白化等级非「无」的覆盖长度占珊瑚总覆盖长度的比例 */
-export function bleachedSharePct(records: Array<{ coverCm: number; bleachLevel: BleachLevel }>): number {
-  const totalCover = records.reduce((sum, record) => sum + Math.max(0, record.coverCm), 0)
+/** 白化占比（%）：白化等级非「无」的覆盖长度占珊瑚总覆盖长度的比例；已复查记录取复查后的值 */
+export function bleachedSharePct(records: CoralCoverLike[]): number {
+  const totalCover = records.reduce((sum, record) => sum + Math.max(0, effectiveCoverCm(record)), 0)
   if (totalCover <= 0) return 0
   const bleached = records
-    .filter((record) => record.bleachLevel !== '无')
-    .reduce((sum, record) => sum + Math.max(0, record.coverCm), 0)
+    .filter((record) => effectiveBleachLevel(record) !== '无')
+    .reduce((sum, record) => sum + Math.max(0, effectiveCoverCm(record)), 0)
   return round((bleached / totalCover) * 100, 1)
 }
 

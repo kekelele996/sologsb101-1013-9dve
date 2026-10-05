@@ -16,6 +16,8 @@ import {
   bleachIndex,
   bleachedSharePct,
   coralCoveragePct,
+  effectiveBleachLevel,
+  effectiveCoverCm,
   fishDensity,
   groupByForm,
   groupByGenus,
@@ -35,6 +37,8 @@ export interface BeltCoverage {
   surveyDate: string
   observer: string
   coralCount: number
+  /** 已补记复查的记录条数 */
+  reviewedCount: number
   coverCmTotal: number
   /** 珊瑚覆盖率（%） */
   coveragePct: number
@@ -133,14 +137,16 @@ export function useCoverage(): UseCoverageResult {
     const beltCorals = corals.value.filter((coral) => coral.beltId === belt.id)
     const beltFishes = fishes.value.filter((fish) => fish.beltId === belt.id)
     const coverCmTotal = round(
-      beltCorals.reduce((sum, coral) => sum + coral.coverCm, 0),
+      beltCorals.reduce((sum, coral) => sum + effectiveCoverCm(coral), 0),
       1
     )
     const index = bleachIndex(beltCorals)
     const distribution = EMPTY_DISTRIBUTION()
     BLEACH_LEVELS.forEach((level) => {
       distribution[level] = round(
-        beltCorals.filter((coral) => coral.bleachLevel === level).reduce((sum, coral) => sum + coral.coverCm, 0),
+        beltCorals
+          .filter((coral) => effectiveBleachLevel(coral) === level)
+          .reduce((sum, coral) => sum + effectiveCoverCm(coral), 0),
         1
       )
     })
@@ -160,14 +166,19 @@ export function useCoverage(): UseCoverageResult {
       surveyDate: belt.surveyDate,
       observer: belt.observer,
       coralCount: beltCorals.length,
+      reviewedCount: beltCorals.filter((coral) => coral.review).length,
       coverCmTotal,
       coveragePct: coralCoveragePct(coverCmTotal, belt.lengthM),
       bleachIndex: index,
       grade: bleachGrade(index),
       bleachedSharePct: bleachedSharePct(beltCorals),
       distribution,
-      byGenus: groupByGenus(beltCorals),
-      byForm: groupByForm(beltCorals),
+      byGenus: groupByGenus(
+        beltCorals.map((coral) => ({ genus: coral.genus, coverCm: effectiveCoverCm(coral) }))
+      ),
+      byForm: groupByForm(
+        beltCorals.map((coral) => ({ form: coral.form, coverCm: effectiveCoverCm(coral) }))
+      ),
       fishTotal,
       invertebrateTotal,
       fishDensity: fishDensity(fishTotal, belt.lengthM)
@@ -194,17 +205,19 @@ export function useCoverage(): UseCoverageResult {
     const siteCorals = corals.value.filter((coral) => beltIds.has(coral.beltId))
     const siteFishes = fishes.value.filter((fish) => beltIds.has(fish.beltId))
     const coverCmTotal = round(
-      siteCorals.reduce((sum, coral) => sum + coral.coverCm, 0),
+      siteCorals.reduce((sum, coral) => sum + effectiveCoverCm(coral), 0),
       1
     )
     const coverages = siteBelts.map((belt) => {
       const beltCorals = siteCorals.filter((coral) => coral.beltId === belt.id)
       return coralCoveragePct(
-        beltCorals.reduce((sum, coral) => sum + coral.coverCm, 0),
+        beltCorals.reduce((sum, coral) => sum + effectiveCoverCm(coral), 0),
         belt.lengthM
       )
     })
-    const indices = siteBelts.map((belt) => bleachIndex(siteCorals.filter((coral) => coral.beltId === belt.id)))
+    const indices = siteBelts.map((belt) =>
+      bleachIndex(siteCorals.filter((coral) => coral.beltId === belt.id))
+    )
     const avgBleachIndex =
       indices.length === 0 ? 0 : round(indices.reduce((sum, value) => sum + value, 0) / indices.length, 2)
     const fishTotal = siteFishes.filter((fish) => fish.category === '鱼类').reduce((sum, fish) => sum + fish.count, 0)
@@ -246,7 +259,9 @@ export function useCoverage(): UseCoverageResult {
     const distribution = EMPTY_DISTRIBUTION()
     BLEACH_LEVELS.forEach((level) => {
       distribution[level] = round(
-        corals.value.filter((coral) => coral.bleachLevel === level).reduce((sum, coral) => sum + coral.coverCm, 0),
+        corals.value
+          .filter((coral) => effectiveBleachLevel(coral) === level)
+          .reduce((sum, coral) => sum + effectiveCoverCm(coral), 0),
         1
       )
     })
@@ -262,13 +277,13 @@ export function useCoverage(): UseCoverageResult {
         .filter((coral) => coral.beltId === beltId)
         .map((record) => ({
           record,
-          coverSharePct: beltLengthCm > 0 ? round((record.coverCm / beltLengthCm) * 100, 1) : 0
+          coverSharePct: beltLengthCm > 0 ? round((effectiveCoverCm(record) / beltLengthCm) * 100, 1) : 0
         }))
         .sort((a, b) => {
           const weightDiff =
-            BLEACH_WEIGHT_ORDER[b.record.bleachLevel] - BLEACH_WEIGHT_ORDER[a.record.bleachLevel]
+            BLEACH_WEIGHT_ORDER[effectiveBleachLevel(b.record)] - BLEACH_WEIGHT_ORDER[effectiveBleachLevel(a.record)]
           if (weightDiff !== 0) return weightDiff
-          return b.record.coverCm - a.record.coverCm
+          return effectiveCoverCm(b.record) - effectiveCoverCm(a.record)
         })
     })
   }

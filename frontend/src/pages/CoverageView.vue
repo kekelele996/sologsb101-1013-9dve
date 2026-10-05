@@ -116,6 +116,8 @@ async function refresh(): Promise<void> {
     surveyDate: row.surveyDate,
     observer: row.observer,
     coralCount: row.coralCount,
+    reviewedCount: row.reviewedCount,
+    lastReviewDate: row.lastReviewDate,
     coverCmTotal: row.coverCmTotal,
     coveragePct: row.coveragePct,
     bleachIndex: row.bleachIndex,
@@ -217,7 +219,8 @@ async function copySummary(): Promise<void> {
   const text = rows.value
     .map(
       (row) =>
-        `${row.reefName}｜站位 ${row.siteNo}｜样带 ${row.beltNo}（${row.orientation}向 ${row.lengthM} m）：珊瑚覆盖率 ${row.coveragePct}%，白化指数 ${row.bleachIndex}（${row.grade}），白化占比 ${row.bleachedSharePct}%，鱼类 ${row.fishTotal} 尾（${row.fishDensity} 尾/100m²）`
+        `${row.reefName}｜站位 ${row.siteNo}｜样带 ${row.beltNo}（${row.orientation}向 ${row.lengthM} m）：珊瑚覆盖率 ${row.coveragePct}%，白化指数 ${row.bleachIndex}（${row.grade}），白化占比 ${row.bleachedSharePct}%，鱼类 ${row.fishTotal} 尾（${row.fishDensity} 尾/100m²）` +
+        (row.reviewedCount > 0 ? `；已复查 ${row.reviewedCount} 条（最近复查 ${row.lastReviewDate}）` : '')
     )
     .join('\n')
   try {
@@ -360,6 +363,7 @@ onMounted(() => {
           <template #default="{ row }">
             <BleachTag :level="row.grade" size="small" />
             <div class="gb-hint gb-mono">指数 {{ row.bleachIndex }} · 白化占比 {{ row.bleachedSharePct }}%</div>
+            <div v-if="row.reviewedCount > 0" class="gb-hint">已复查 {{ row.reviewedCount }} 条</div>
           </template>
         </el-table-column>
         <el-table-column label="白化等级分布 (cm)" min-width="220">

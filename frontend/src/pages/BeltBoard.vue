@@ -17,7 +17,7 @@ import { ORIENTATION_ORDER, useBeltStore } from '@/stores/beltStore'
 import { useSurveyStore } from '@/stores/surveyStore'
 import { BELT_LENGTH_PRESETS, ORIENTATIONS } from '@/types/belt'
 import type { Belt, Orientation } from '@/types/belt'
-import { bleachGrade, bleachIndex, coralCoveragePct, fishDensity } from '@/utils/bleach'
+import { bleachGrade, bleachIndex, coralCoveragePct, effectiveCoverCm, fishDensity } from '@/utils/bleach'
 import { initDatabase } from '@/utils/db'
 
 const route = useRoute()
@@ -46,7 +46,7 @@ const rows = computed(() =>
   beltStore.beltsOfSite(siteId.value).map((belt) => {
     const corals = surveyStore.coralsOfBelt(belt.id)
     const fishes = surveyStore.fishesOfBelt(belt.id)
-    const coverCmTotal = corals.reduce((sum, coral) => sum + coral.coverCm, 0)
+    const coverCmTotal = corals.reduce((sum, coral) => sum + effectiveCoverCm(coral), 0)
     const index = bleachIndex(corals)
     const fishTotal = fishes.filter((fish) => fish.category === '鱼类').reduce((sum, fish) => sum + fish.count, 0)
     return {

@@ -8,7 +8,7 @@
 import { computed, onMounted, reactive, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Delete, DocumentCopy, Edit, Plus } from '@element-plus/icons-vue'
+import { Delete, DocumentCopy, Edit, Finished, Plus } from '@element-plus/icons-vue'
 import BleachTag from '@/components/common/BleachTag.vue'
 import StatBadge from '@/components/common/StatBadge.vue'
 import EmptyPanel from '@/components/common/EmptyPanel.vue'
@@ -23,7 +23,19 @@ import {
   parseCoralPaste
 } from '@/types/coralRecord'
 import type { BleachLevel, CoralForm, CoralRecord } from '@/types/coralRecord'
-import { BLEACH_BG, BLEACH_COLOR, bleachGrade, bleachIndex, bleachedSharePct, coralCoveragePct, groupByForm, groupByGenus } from '@/utils/bleach'
+import {
+  BLEACH_BG,
+  BLEACH_COLOR,
+  bleachGrade,
+  bleachIndex,
+  bleachedSharePct,
+  clampReviewCoverCm,
+  coralCoveragePct,
+  effectiveBleachLevel,
+  effectiveCoverCm,
+  groupByForm,
+  groupByGenus
+} from '@/utils/bleach'
 import { initDatabase } from '@/utils/db'
 
 const route = useRoute()
@@ -52,42 +64,57 @@ const form = reactive({
   remark: ''
 })
 
+/** 复查补记弹窗：每条记录最多一次复查 */
+const reviewVisible = ref(false)
+const reviewTarget = ref<CoralRecord | null>(null)
+const reviewSubmitting = ref(false)
+const reviewForm = reactive({
+  reviewDate: '',
+  reviewCoverCm: 100,
+  reviewBleachLevel: '无' as BleachLevel
+})
+
 const records = computed(() => surveyStore.coralsOfBelt(beltId.value))
 
-/** 按属名分组汇总 */
+/** 按属名分组汇总（覆盖长度取复查后的值） */
 const genusGroups = computed(() =>
-  groupByGenus(records.value).map((group) => {
+  groupByGenus(
+    records.value.map((record) => ({ genus: record.genus, coverCm: effectiveCoverCm(record) }))
+  ).map((group) => {
     const list = records.value.filter((record) => record.genus === group.genus)
     const index = bleachIndex(list)
     return { ...group, count: list.length, bleachIndex: index, grade: bleachGrade(index) }
   })
 )
 
-/** 按形态分组汇总 */
-const formGroups = computed(() => groupByForm(records.value))
+/** 按形态分组汇总（覆盖长度取复查后的值） */
+const formGroups = computed(() =>
+  groupByForm(records.value.map((record) => ({ form: record.form, coverCm: effectiveCoverCm(record) })))
+)
 
 const stats = computed(() => {
   const list = records.value
-  const coverCmTotal = list.reduce((sum, record) => sum + record.coverCm, 0)
+  const coverCmTotal = list.reduce((sum, record) => sum + effectiveCoverCm(record), 0)
   const index = bleachIndex(list)
   return {
     coralCount: list.length,
+    reviewedCount: list.filter((record) => record.review).length,
     coverCmTotal,
     coveragePct: belt.value ? coralCoveragePct(coverCmTotal, belt.value.lengthM) : 0,
     bleachIndex: index,
     grade: bleachGrade(index),
     bleachedSharePct: bleachedSharePct(list),
-    maxCoverCm: list.length ? Math.max(...list.map((record) => record.coverCm)) : 0
+    maxCoverCm: list.length ? Math.max(...list.map((record) => effectiveCoverCm(record))) : 0
   }
 })
 
-/** 白化等级 → 累计覆盖长度 */
+/** 白化等级 → 累计覆盖长度（复查后的值） */
 const distribution = computed<Record<BleachLevel, number>>(() => {
   const result: Record<BleachLevel, number> = { 无: 0, 轻: 0, 中: 0, 重: 0, 死亡: 0 }
   BLEACH_LEVELS.forEach((level) => {
     result[level] = records.value
-      .filter((record) => record.bleachLevel === level)
-      .reduce((sum, record) => sum + record.coverCm, 0)
+      .filter((record) => effectiveBleachLevel(record) === level)
+      .reduce((sum, record) => sum + effectiveCoverCm(record), 0)
   })
   return result
 })
@@ -141,10 +168,11 @@ async function submitForm(): Promise<void> {
       remark: form.remark.trim()
     }
     if (editingId.value) {
+      // 编辑初查信息时保留已补记的复查
       await surveyStore.updateCoral(editingId.value, payload)
       ElMessage.success('珊瑚记录已更新')
     } else {
-      await surveyStore.createCoral(beltId.value, payload)
+      await surveyStore.createCoral(beltId.value, { ...payload, review: null })
       ElMessage.success('珊瑚记录已新增，覆盖率与白化占比已重算')
     }
     dialogVisible.value = false
@@ -166,6 +194,71 @@ async function removeRecord(record: CoralRecord): Promise<void> {
   await surveyStore.removeCoral(record.id)
   selectedIds.value = selectedIds.value.filter((id) => id !== record.id)
   ElMessage.success('珊瑚记录已删除')
+}
+
+/* ------------------------------ 复查补记 ------------------------------ */
+
+/** 打开复查弹窗：每条记录最多一次复查，已复查则回显复查值 */
+function openReview(record: CoralRecord): void {
+  reviewTarget.value = record
+  reviewForm.reviewDate = record.review?.reviewDate ?? belt.value?.surveyDate ?? ''
+  reviewForm.reviewCoverCm = record.review?.reviewCoverCm ?? record.coverCm
+  reviewForm.reviewBleachLevel = record.review?.reviewBleachLevel ?? record.bleachLevel
+  reviewVisible.value = true
+}
+
+/** 复查日期不可早于样带调查日期 */
+function disableReviewDate(date: Date): boolean {
+  if (!belt.value?.surveyDate) return false
+  return date < new Date(`${belt.value.surveyDate}T00:00:00`)
+}
+
+async function submitReview(): Promise<void> {
+  if (!reviewTarget.value) return
+  if (!reviewForm.reviewDate) {
+    ElMessage.warning('请选择复查日期')
+    return
+  }
+  if (belt.value && reviewForm.reviewDate < belt.value.surveyDate) {
+    ElMessage.warning(`复查日期不能早于调查日期（${belt.value.surveyDate}）`)
+    return
+  }
+  if (!Number.isFinite(reviewForm.reviewCoverCm) || reviewForm.reviewCoverCm < 0) {
+    ElMessage.warning('复查覆盖长度应为非负数字（cm）')
+    return
+  }
+  const clamped = clampReviewCoverCm(reviewForm.reviewCoverCm, belt.value?.lengthM ?? 0)
+  if (clamped < reviewForm.reviewCoverCm) {
+    ElMessage.info(`复查覆盖长度超出样带全长，已按样带全长 ${clamped} cm 记`)
+  }
+  reviewSubmitting.value = true
+  try {
+    await surveyStore.saveCoralReview(reviewTarget.value.id, {
+      reviewDate: reviewForm.reviewDate,
+      reviewCoverCm: clamped,
+      reviewBleachLevel: reviewForm.reviewBleachLevel
+    })
+    ElMessage.success('复查已补记，覆盖率、白化指数与白化占比已按复查后的值重算')
+    reviewVisible.value = false
+  } catch (err) {
+    ElMessage.error(err instanceof Error ? err.message : '复查保存失败')
+  } finally {
+    reviewSubmitting.value = false
+  }
+}
+
+async function clearReview(record: CoralRecord): Promise<void> {
+  try {
+    await ElMessageBox.confirm(
+      `清除「${record.genus}（${record.form}）」的复查记录？清除后覆盖率与白化指数恢复按初查值计算。`,
+      '清除复查确认',
+      { type: 'warning', confirmButtonText: '清除复查', cancelButtonText: '取消' }
+    )
+  } catch {
+    return
+  }
+  await surveyStore.clearCoralReview(record.id)
+  ElMessage.success('复查已清除')
 }
 
 function toggleSelect(id: string): void {
@@ -283,6 +376,7 @@ onMounted(() => {
 
       <div class="gb-stats-row">
         <StatBadge label="珊瑚记录" :value="stats.coralCount" suffix="条" icon="Histogram" />
+        <StatBadge label="已复查" :value="stats.reviewedCount" suffix="条" tone="warning" icon="Finished" />
         <StatBadge label="覆盖长度合计" :value="stats.coverCmTotal" suffix="cm" tone="info" icon="Odometer" />
         <StatBadge label="珊瑚覆盖率" :value="stats.coveragePct" suffix="%" :percent="Math.min(100, stats.coveragePct)" tone="success" icon="PieChart" />
         <StatBadge
@@ -375,22 +469,41 @@ onMounted(() => {
         </el-table-column>
         <el-table-column prop="genus" label="属名" min-width="140" />
         <el-table-column prop="form" label="形态" width="100" />
-        <el-table-column label="覆盖长度 (cm)" width="140" align="right">
+        <el-table-column label="覆盖长度 (cm)" width="150" align="right">
           <template #default="{ row }">
-            <span class="gb-mono">{{ row.coverCm }}</span>
-            <div class="gb-hint gb-mono">
+            <span class="gb-mono">{{ effectiveCoverCm(row) }}</span>
+            <div v-if="row.review" class="gb-hint gb-mono">
+              初查 {{ row.coverCm }} · 占样带
+              {{ belt.lengthM > 0 ? ((effectiveCoverCm(row) / (belt.lengthM * 100)) * 100).toFixed(1) : '0.0' }}%
+            </div>
+            <div v-else class="gb-hint gb-mono">
               占样带 {{ belt.lengthM > 0 ? ((row.coverCm / (belt.lengthM * 100)) * 100).toFixed(1) : '0.0' }}%
             </div>
           </template>
         </el-table-column>
-        <el-table-column label="白化等级" width="150">
+        <el-table-column label="白化等级" width="160">
           <template #default="{ row }">
-            <BleachTag :level="row.bleachLevel" size="small" :plain="true" />
+            <BleachTag :level="effectiveBleachLevel(row)" size="small" :plain="true" />
+            <div v-if="row.review" class="gb-hint">初查 {{ row.bleachLevel }}</div>
+          </template>
+        </el-table-column>
+        <el-table-column label="复查" width="170">
+          <template #default="{ row }">
+            <template v-if="row.review">
+              <div class="gb-mono">{{ row.review.reviewDate }}</div>
+              <div class="gb-hint gb-mono">
+                {{ row.review.reviewCoverCm }} cm · <BleachTag :level="row.review.reviewBleachLevel" size="small" />
+              </div>
+            </template>
+            <span v-else class="gb-hint">未复查</span>
           </template>
         </el-table-column>
         <el-table-column prop="remark" label="备注" min-width="160" show-overflow-tooltip />
-        <el-table-column label="操作" width="170" fixed="right">
+        <el-table-column label="操作" width="240" fixed="right">
           <template #default="{ row }">
+            <el-button size="small" type="success" plain :icon="Finished" @click="openReview(row)">
+              {{ row.review ? '改复查' : '复查' }}
+            </el-button>
             <el-button size="small" :icon="Edit" @click="openEdit(row)">编辑</el-button>
             <el-button size="small" type="danger" plain :icon="Delete" @click="removeRecord(row)">删除</el-button>
           </template>
@@ -451,6 +564,59 @@ onMounted(() => {
         <el-button type="primary" :loading="submitting" @click="submitForm">
           {{ editingId ? '保存修改' : '新增记录' }}
         </el-button>
+      </template>
+    </el-dialog>
+
+    <el-dialog
+      v-model="reviewVisible"
+      :title="reviewTarget?.review ? '修改复查' : '补记复查'"
+      width="540px"
+      :close-on-click-modal="false"
+    >
+      <el-alert
+        type="info"
+        :closable="false"
+        show-icon
+        class="review-tip"
+        :title="`复查记录「${reviewTarget?.genus ?? ''}（${reviewTarget?.form ?? ''}）」：每条记录仅可补记一次复查，保存后覆盖率、白化指数与白化占比改用复查后的数。`"
+      />
+      <el-form label-width="110px">
+        <el-form-item label="复查日期" required>
+          <el-date-picker
+            v-model="reviewForm.reviewDate"
+            type="date"
+            value-format="YYYY-MM-DD"
+            placeholder="选择复查日期"
+            :disabled-date="disableReviewDate"
+          />
+          <span class="page__unit">不早于调查日期（{{ belt?.surveyDate ?? '—' }}）</span>
+        </el-form-item>
+        <el-form-item label="复查覆盖长度" required>
+          <el-input-number
+            v-model="reviewForm.reviewCoverCm"
+            :min="0"
+            :max="belt ? belt.lengthM * 100 : 10000"
+            :step="10"
+            controls-position="right"
+          />
+          <span class="page__unit">
+            cm（样带全长 {{ belt ? belt.lengthM * 100 : 0 }} cm，超出按全长记）
+          </span>
+        </el-form-item>
+        <el-form-item label="复查白化等级" required>
+          <el-radio-group v-model="reviewForm.reviewBleachLevel">
+            <el-radio-button v-for="level in BLEACH_LEVELS" :key="level" :value="level">
+              {{ level }}
+            </el-radio-button>
+          </el-radio-group>
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button v-if="reviewTarget?.review" type="danger" plain @click="clearReview(reviewTarget)">
+          清除复查
+        </el-button>
+        <el-button @click="reviewVisible = false">取消</el-button>
+        <el-button type="primary" :loading="reviewSubmitting" @click="submitReview">保存复查</el-button>
       </template>
     </el-dialog>
 
@@ -551,5 +717,9 @@ onMounted(() => {
   margin-top: 10px;
   max-height: 160px;
   overflow: auto;
+}
+
+.review-tip {
+  margin-bottom: 14px;
 }
 </style>
